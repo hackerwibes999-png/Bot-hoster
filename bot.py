@@ -13,7 +13,10 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 
-from config import BOT_TOKEN, ADMIN_IDS, UPLOAD_DIR, MAX_FILE_SIZE, SUPPORTED_EXTENSIONS
+from config import (
+    BOT_TOKEN, ADMIN_IDS, UPLOAD_DIR, BOTS_DIR, LOGS_DIR, 
+    MAX_FILE_SIZE, SUPPORTED_EXTENSIONS
+)
 from database import (
     init_db, add_bot, update_bot_status, get_user_bots, 
     get_bot, delete_bot, get_user_bot_count, get_user_max_bots,
@@ -494,7 +497,7 @@ def shutdown_handler(signum, frame):
     """Handle shutdown signals"""
     print("\n🛑 Shutting down bot...")
     # Clean up any running processes
-    for bot_id in bot_manager.processes:
+    for bot_id in list(bot_manager.processes.keys()):
         try:
             bot_manager.stop_bot(bot_id)
         except:
