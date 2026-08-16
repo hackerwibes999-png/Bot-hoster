@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: your-bot-host-name
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        value: 8618299910:AAF6UyVQ6n0gFbDar9XYPq4QCCKPhxqegaY
+      - key: ADMIN_IDS
+        value: 5468237078
