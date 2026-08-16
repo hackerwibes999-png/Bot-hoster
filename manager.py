@@ -4,257 +4,6 @@ import shutil
 import zipfile
 import json
 import time
-import re
-from pathlib import Path
-from typing import Tuple, Optional
-import uuid
-
-from config import BOTS_DIR, LOGS_DIR
-
-class BotManager:
-    def __init__(self):
-        self.bots_dir = BOTS_DIR
-        self.logs_dir = LOGS_DIR
-        
-    def extract_and_prepare(self, file_path: str, bot_id: str) -> Tuple[bool, str, str]:
-        """
-        Extract uploaded file and prepare bot environment
-        Returns: (success, bot_type, main_file_path)
-        """
-        bot_folder = os.path.join(self.bots_dir, bot_id)
-        os.makedirs(bot_folder, exist_ok=True)
-        
-        # Copy file to bot folder
-        file_name = os.path.basename(file_path)
-        dest_file = os.path.join(bot_folder, file_name)
-        shutil.copy2(file_path, dest_file)
-        
-        # Detect file type and extract
-        if file_name.endswith('.zip'):
-            try:
-                with zipfile.ZipFile(dest_file, 'r') as zip_ref:
-                    zip_ref.extractall(bot_folder)
-                os.remove(dest_file)
-            except Exception as e:
-                return False, "", f"Failed to extract zip: {str(e)}"
-        
-        # Detect main file
-        main_file = self._detect_main_file(bot_folder)
-        if not main_file:
-            return False, "", "No main file found (bot.py, main.py, bot.js, index.js)"
-        
-        # Detect bot type
-        bot_type = 'python' if main_file.endswith('.py') else 'nodejs'
-        
-        # Install dependencies
-        success, error = self._install_dependencies(bot_folder, bot_type)
-        if not success:
-            return False, "", f"Failed to install dependencies: {error}"
-        
-        return True, bot_type, main_file
-    
-    def _detect_main_file(self, folder: str) -> Optional[str]:
-        """Detect main bot file"""
-        possible_files = ['bot.py', 'main.py', 'bot.js', 'index.js', 'app.js']
-        
-        for file in possible_files:
-            file_path = os.path.join(folder, file)
-            if os.path.isfile(file_path):
-                return file_path
-        
-        # Check for any .py or .js file in root
-        for file in os.listdir(folder):
-            if file.endswith('.py') or file.endswith('.js'):
-                return os.path.join(folder, file)
-        
-        return None
-    
-    def _install_dependencies(self, folder: str, bot_type: str) -> Tuple[bool, str]:
-        """Install dependencies for the bot"""
-        try:
-            if bot_type == 'python':
-                req_file = os.path.join(folder, 'requirements.txt')
-                if os.path.isfile(req_file):
-                    result = subprocess.run(
-                        ['pip', 'install', '-r', req_file],
-                        cwd=folder,
-                        capture_output=True,
-                        text=True,
-                        timeout=120
-                    )
-                    if result.returncode != 0:
-                        return False, result.stderr
-                    
-                # Check if python-telegram-bot is installed
-                try:
-                    subprocess.run(['pip', 'show', 'python-telegram-bot'], 
-                                 capture_output=True, check=True)
-                except subprocess.CalledProcessError:
-                    # Install python-telegram-bot if not present
-                    subprocess.run(['pip', 'install', 'python-telegram-bot'], 
-                                 cwd=folder, capture_output=True, timeout=60)
-                
-            elif bot_type == 'nodejs':
-                package_file = os.path.join(folder, 'package.json')
-                if not os.path.isfile(package_file):
-                    # Create minimal package.json
-                    package_data = {
-                        "name": "telegram-bot",
-                        "version": "1.0.0",
-                        "dependencies": {
-                            "node-telegram-bot-api": "^0.61.0"
-                        }
-                    }
-                    with open(package_file, 'w') as f:
-                        json.dump(package_data, f, indent=2)
-                
-                # Install npm dependencies
-                result = subprocess.run(
-                    ['npm', 'install', '--production'],
-                    cwd=folder,
-                    capture_output=True,
-                    text=True,
-                    timeout=180
-                )
-                if result.returncode != 0:
-                    return False, result.stderr
-            
-            return True, ""
-            
-        except subprocess.TimeoutExpired:
-            return False, "Dependency installation timed out"
-        except Exception as e:
-            return False, str(e)
-    
-    def start_bot(self, bot_id: str, bot_type: str, main_file: str, bot_token: str) -> Tuple[bool, str, str]:
-        """
-        Start the bot using pm2
-        Returns: (success, process_id, error_message)
-        """
-        bot_folder = os.path.join(self.bots_dir, bot_id)
-        log_file = os.path.join(self.logs_dir, f"{bot_id}.log")
-        
-        # Set environment variable for bot token
-        env = os.environ.copy()
-        env['BOT_TOKEN'] = bot_token
-        
-        # Build pm2 start command
-        if bot_type == 'python':
-            cmd = ['pm2', 'start', main_file, '--name', bot_id, '--interpreter', 'python3']
-        else:  # nodejs
-            cmd = ['pm2', 'start', main_file, '--name', bot_id]
-        
-        try:
-            # Start with pm2
-            result = subprocess.run(
-                cmd,
-                cwd=bot_folder,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            
-            if result.returncode != 0:
-                return False, "", result.stderr
-            
-            # Get process ID
-            process_id = self._get_pm2_process_id(bot_id)
-            if not process_id:
-                return False, "", "Failed to get process ID"
-            
-            return True, process_id, ""
-            
-        except subprocess.TimeoutExpired:
-            return False, "", "Startup timed out"
-        except Exception as e:
-            return False, "", str(e)
-    
-    def _get_pm2_process_id(self, bot_id: str) -> Optional[str]:
-        """Get pm2 process ID for bot"""
-        try:
-            result = subprocess.run(
-                ['pm2', 'jlist'],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                processes = json.loads(result.stdout)
-                for proc in processes:
-                    if proc.get('name') == bot_id:
-                        return str(proc.get('pm_id'))
-            return None
-        except:
-            return None
-    
-    def stop_bot(self, bot_id: str) -> Tuple[bool, str]:
-        """Stop the bot"""
-        try:
-            result = subprocess.run(
-                ['pm2', 'stop', bot_id],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode != 0:
-                return False, result.stderr
-            return True, ""
-        except Exception as e:
-            return False, str(e)
-    
-    def restart_bot(self, bot_id: str) -> Tuple[bool, str]:
-        """Restart the bot"""
-        try:
-            result = subprocess.run(
-                ['pm2', 'restart', bot_id],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode != 0:
-                return False, result.stderr
-            return True, ""
-        except Exception as e:
-            return False, str(e)
-    
-    def delete_bot(self, bot_id: str) -> Tuple[bool, str]:
-        """Delete bot from pm2 and filesystem"""
-        try:
-            # Stop and delete from pm2
-            subprocess.run(['pm2', 'delete', bot_id], capture_output=True, timeout=10)
-            
-            # Delete bot folder
-            bot_folder = os.path.join(self.bots_dir, bot_id)
-            if os.path.exists(bot_folder):
-                shutil.rmtree(bot_folder)
-            
-            # Delete log file
-            log_file = os.path.join(self.logs_dir, f"{bot_id}.log")
-            if os.path.exists(log_file):
-                os.remove(log_file)
-            
-            return True, ""
-        except Exception as e:
-            return False, str(e)
-    
-    def get_logs(self, bot_id: str, lines: int = 50) -> str:
-        """Get bot logs"""
-        log_file = os.path.join(self.logs_dir, f"{bot_id}.log")
-        if not os.path.exists(log_file):
-            return "No logs found"
-        
-        try:
-            result = subprocess.run(
-                ['tail', '-n', str(lines), log_file],
-                capture_output=True,
-                text=True
-            )
-import os
-import subprocess
-import shutil
-import zipfile
-import json
-import time
 import signal
 from pathlib import Path
 from typing import Tuple, Optional
@@ -267,7 +16,6 @@ class BotManager:
         self.bots_dir = BOTS_DIR
         self.logs_dir = LOGS_DIR
         self.processes = {}  # Store running processes
-        self.pid_files = {}  # Store PID file paths
     
     def extract_and_prepare(self, file_path: str, bot_id: str) -> Tuple[bool, str, str]:
         """Extract uploaded file and prepare bot environment"""
@@ -326,6 +74,8 @@ class BotManager:
                 if result.returncode != 0:
                     return False, result.stderr
             return True, ""
+        except subprocess.TimeoutExpired:
+            return False, "Dependency installation timed out"
         except Exception as e:
             return False, str(e)
     
@@ -348,8 +98,7 @@ class BotManager:
                 env=env,
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+                stdin=subprocess.DEVNULL
             )
             
             # Store process info
@@ -363,8 +112,6 @@ class BotManager:
             pid_file = os.path.join(bot_folder, '.pid')
             with open(pid_file, 'w') as f:
                 f.write(str(process.pid))
-            
-            self.pid_files[bot_id] = pid_file
             
             return True, str(process.pid), ""
             
@@ -380,11 +127,10 @@ class BotManager:
                 log_file = self.processes[bot_id]['log_file']
                 
                 # Send SIGTERM
-                if hasattr(os, 'kill'):
-                    try:
-                        os.kill(process.pid, signal.SIGTERM)
-                    except:
-                        pass
+                try:
+                    os.kill(process.pid, signal.SIGTERM)
+                except:
+                    pass
                 
                 # Wait for process to end
                 try:
@@ -419,9 +165,22 @@ class BotManager:
     
     def restart_bot(self, bot_id: str) -> Tuple[bool, str]:
         """Restart bot"""
-        # Need to get bot info from database
-        # This will be handled in bot.py
-        return True, ""
+        # Get bot info from database
+        from database import get_bot
+        bot = get_bot(bot_id)
+        if not bot:
+            return False, "Bot not found"
+        
+        # Stop the bot
+        self.stop_bot(bot_id)
+        
+        # Start it again
+        return self.start_bot(
+            bot_id, 
+            bot['bot_type'], 
+            bot['main_file'], 
+            bot['bot_token']
+        )
     
     def delete_bot(self, bot_id: str) -> Tuple[bool, str]:
         """Delete bot"""
@@ -448,8 +207,8 @@ class BotManager:
                 content = f.read()
                 lines_list = content.split('\n')
                 return '\n'.join(lines_list[-lines:])
-        except:
-            return "Error reading logs"
+        except Exception as e:
+            return f"Error reading logs: {str(e)}"
     
     def get_bot_status(self, bot_id: str) -> str:
         """Check if bot is running"""
@@ -467,7 +226,7 @@ class BotManager:
                 except:
                     return 'stopped'
             return 'stopped'
-        except:
+        except Exception as e:
             return 'unknown'
     
     def verify_bot_token(self, bot_token: str) -> Tuple[bool, str]:
@@ -481,5 +240,5 @@ class BotManager:
                 if data.get('ok'):
                     return True, data.get('result', {}).get('username', 'Unknown')
             return False, ""
-        except:
+        except Exception as e:
             return False, ""
