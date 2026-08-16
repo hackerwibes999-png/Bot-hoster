@@ -249,32 +249,229 @@ class BotManager:
                 capture_output=True,
                 text=True
             )
-            return result.stdout or "No logs available"
+import os
+import subprocess
+import shutil
+import zipfile
+import json
+import time
+import signal
+from pathlib import Path
+from typing import Tuple, Optional
+import uuid
+
+from config import BOTS_DIR, LOGS_DIR
+
+class BotManager:
+    def __init__(self):
+        self.bots_dir = BOTS_DIR
+        self.logs_dir = LOGS_DIR
+        self.processes = {}  # Store running processes
+        self.pid_files = {}  # Store PID file paths
+    
+    def extract_and_prepare(self, file_path: str, bot_id: str) -> Tuple[bool, str, str]:
+        """Extract uploaded file and prepare bot environment"""
+        bot_folder = os.path.join(self.bots_dir, bot_id)
+        os.makedirs(bot_folder, exist_ok=True)
+        
+        file_name = os.path.basename(file_path)
+        dest_file = os.path.join(bot_folder, file_name)
+        shutil.copy2(file_path, dest_file)
+        
+        if file_name.endswith('.zip'):
+            try:
+                with zipfile.ZipFile(dest_file, 'r') as zip_ref:
+                    zip_ref.extractall(bot_folder)
+                os.remove(dest_file)
+            except Exception as e:
+                return False, "", f"Failed to extract zip: {str(e)}"
+        
+        main_file = self._detect_main_file(bot_folder)
+        if not main_file:
+            return False, "", "No main file found (bot.py or main.py)"
+        
+        bot_type = 'python'
+        
+        success, error = self._install_dependencies(bot_folder)
+        if not success:
+            return False, "", f"Failed to install dependencies: {error}"
+        
+        return True, bot_type, main_file
+    
+    def _detect_main_file(self, folder: str) -> Optional[str]:
+        """Detect main bot file"""
+        possible_files = ['bot.py', 'main.py']
+        for file in possible_files:
+            file_path = os.path.join(folder, file)
+            if os.path.isfile(file_path):
+                return file_path
+        
+        for file in os.listdir(folder):
+            if file.endswith('.py'):
+                return os.path.join(folder, file)
+        return None
+    
+    def _install_dependencies(self, folder: str) -> Tuple[bool, str]:
+        """Install Python dependencies"""
+        try:
+            req_file = os.path.join(folder, 'requirements.txt')
+            if os.path.isfile(req_file):
+                result = subprocess.run(
+                    ['pip', 'install', '-r', req_file],
+                    cwd=folder,
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                if result.returncode != 0:
+                    return False, result.stderr
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+    
+    def start_bot(self, bot_id: str, bot_type: str, main_file: str, bot_token: str) -> Tuple[bool, str, str]:
+        """Start bot using subprocess (no PM2)"""
+        bot_folder = os.path.join(self.bots_dir, bot_id)
+        log_file = os.path.join(self.logs_dir, f"{bot_id}.log")
+        
+        env = os.environ.copy()
+        env['BOT_TOKEN'] = bot_token
+        
+        try:
+            # Open log file
+            log_f = open(log_file, 'w')
+            
+            # Start process
+            process = subprocess.Popen(
+                ['python3', main_file],
+                cwd=bot_folder,
+                env=env,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                preexec_fn=os.setsid if hasattr(os, 'setsid') else None
+            )
+            
+            # Store process info
+            self.processes[bot_id] = {
+                'process': process,
+                'pid': str(process.pid),
+                'log_file': log_f
+            }
+            
+            # Save PID to file
+            pid_file = os.path.join(bot_folder, '.pid')
+            with open(pid_file, 'w') as f:
+                f.write(str(process.pid))
+            
+            self.pid_files[bot_id] = pid_file
+            
+            return True, str(process.pid), ""
+            
+        except Exception as e:
+            return False, "", str(e)
+    
+    def stop_bot(self, bot_id: str) -> Tuple[bool, str]:
+        """Stop bot using PID"""
+        try:
+            # Try to stop using stored process
+            if bot_id in self.processes:
+                process = self.processes[bot_id]['process']
+                log_file = self.processes[bot_id]['log_file']
+                
+                # Send SIGTERM
+                if hasattr(os, 'kill'):
+                    try:
+                        os.kill(process.pid, signal.SIGTERM)
+                    except:
+                        pass
+                
+                # Wait for process to end
+                try:
+                    process.wait(timeout=5)
+                except:
+                    process.kill()
+                
+                log_file.close()
+                del self.processes[bot_id]
+                return True, ""
+            
+            # Try using PID file
+            bot_folder = os.path.join(self.bots_dir, bot_id)
+            pid_file = os.path.join(bot_folder, '.pid')
+            if os.path.exists(pid_file):
+                with open(pid_file, 'r') as f:
+                    pid = int(f.read().strip())
+                
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    time.sleep(1)
+                    os.kill(pid, signal.SIGKILL)
+                except:
+                    pass
+                
+                os.remove(pid_file)
+                return True, ""
+            
+            return False, "Bot not running"
+        except Exception as e:
+            return False, str(e)
+    
+    def restart_bot(self, bot_id: str) -> Tuple[bool, str]:
+        """Restart bot"""
+        # Need to get bot info from database
+        # This will be handled in bot.py
+        return True, ""
+    
+    def delete_bot(self, bot_id: str) -> Tuple[bool, str]:
+        """Delete bot"""
+        self.stop_bot(bot_id)
+        
+        bot_folder = os.path.join(self.bots_dir, bot_id)
+        if os.path.exists(bot_folder):
+            shutil.rmtree(bot_folder)
+        
+        log_file = os.path.join(self.logs_dir, f"{bot_id}.log")
+        if os.path.exists(log_file):
+            os.remove(log_file)
+        
+        return True, ""
+    
+    def get_logs(self, bot_id: str, lines: int = 50) -> str:
+        """Get logs"""
+        log_file = os.path.join(self.logs_dir, f"{bot_id}.log")
+        if not os.path.exists(log_file):
+            return "No logs found"
+        
+        try:
+            with open(log_file, 'r') as f:
+                content = f.read()
+                lines_list = content.split('\n')
+                return '\n'.join(lines_list[-lines:])
         except:
             return "Error reading logs"
     
     def get_bot_status(self, bot_id: str) -> str:
-        """Get bot status from pm2"""
+        """Check if bot is running"""
         try:
-            result = subprocess.run(
-                ['pm2', 'jlist'],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                processes = json.loads(result.stdout)
-                for proc in processes:
-                    if proc.get('name') == bot_id:
-                        return proc.get('pm2_env', {}).get('status', 'unknown')
+            # Check using PID file
+            bot_folder = os.path.join(self.bots_dir, bot_id)
+            pid_file = os.path.join(bot_folder, '.pid')
+            if os.path.exists(pid_file):
+                with open(pid_file, 'r') as f:
+                    pid = int(f.read().strip())
+                # Check if process exists
+                try:
+                    os.kill(pid, 0)
+                    return 'online'
+                except:
+                    return 'stopped'
             return 'stopped'
         except:
             return 'unknown'
     
     def verify_bot_token(self, bot_token: str) -> Tuple[bool, str]:
-        """
-        Verify if a bot token is valid by making a test request
-        Returns: (is_valid, bot_username)
-        """
+        """Verify bot token"""
         import requests
         try:
             url = f"https://api.telegram.org/bot{bot_token}/getMe"
