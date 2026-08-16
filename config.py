@@ -1,6 +1,6 @@
 import os
 
-BOT_TOKEN = "8630464736:AAFO-T_CDT63Z2ynycRHXQpop9alcX7vJk8"  # Replace with your bot token
+BOT_TOKEN = "8618299910:AAF6UyVQ6n0gFbDar9XYPq4QCCKPhxqegaY"  # Replace with your bot token
 ADMIN_IDS = [5468237078]  # Your Telegram user ID(s)
 
 # Paths
