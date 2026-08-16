@@ -3,6 +3,7 @@ import sys
 import uuid
 import shutil
 import asyncio
+import signal
 from datetime import datetime
 from pathlib import Path
 
@@ -34,21 +35,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_text = (
         "🤖 Welcome to Bot Hosting Service!\n\n"
-        "I can host your Telegram bots written in Python or Node.js.\n\n"
+        "I can host your Telegram bots written in Python.\n\n"
         "Commands:\n"
         "/deploy - Upload and deploy a new bot\n"
         "/list - List your deployed bots\n"
         "/help - Show this message\n\n"
         "How to deploy:\n"
-        "1. Send me a .zip file or .py/.js file\n"
-        "2. Include requirements.txt (for Python) or package.json (for Node.js)\n"
+        "1. Send me a .zip file or .py file\n"
+        "2. Include requirements.txt\n"
         "3. Make sure your bot uses long polling (not webhooks)\n"
         "4. Your bot should read token from environment variable BOT_TOKEN\n\n"
         "Limits:\n"
         "- Max 5 bots per user\n"
         "- Max file size: 10MB\n"
-        "- Python 3.8+ or Node.js 16+\n"
-        "- Supports python-telegram-bot and node-telegram-bot-api"
+        "- Python 3.8+\n"
+        "- Supports python-telegram-bot library"
     )
     await update.message.reply_text(welcome_text)
 
@@ -106,8 +107,7 @@ async def handle_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Token verified! Bot: @{username}\n\n"
         "Now send me your bot code file:\n"
-        "- Python: .py file or .zip with requirements.txt\n"
-        "- Node.js: .js file or .zip with package.json\n\n"
+        "- Python: .py file or .zip with requirements.txt\n\n"
         "Make sure your bot uses long polling (not webhooks)!"
     )
     user_states[user_id] = {'step': 'awaiting_file', 'token': token}
@@ -221,7 +221,7 @@ async def list_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     for i, bot in enumerate(bots, 1):
         bot_id = bot['id']
-        # Get live status from pm2
+        # Get live status
         live_status = bot_manager.get_bot_status(bot_id)
         status_emoji = "🟢" if live_status == 'online' else "🔴"
         
@@ -369,8 +369,15 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_id = context.args[0]
     bot = get_bot(bot_id)
     
-    if not bot or bot['user_id'] != user_id:
-        await update.message.reply_text("❌ Bot not found or access denied.")
+    if not bot:
+        await update.message.reply_text(
+            f"❌ Bot '{bot_id}' not found in database.\n"
+            "Use /list to see your deployed bots."
+        )
+        return
+    
+    if bot['user_id'] != user_id:
+        await update.message.reply_text("❌ Access denied. This bot belongs to another user.")
         return
     
     logs = bot_manager.get_logs(bot_id, 50)
@@ -454,10 +461,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Deployment Process:\n"
         "1. /deploy - Start deployment\n"
         "2. Send your bot token (from @BotFather)\n"
-        "3. Send your bot code (.py, .js, or .zip)\n\n"
+        "3. Send your bot code (.py or .zip)\n\n"
         "Requirements:\n"
-        "- Python bots: Use python-telegram-bot library\n"
-        "- Node.js bots: Use node-telegram-bot-api library\n"
+        "- Python bots using python-telegram-bot library\n"
         "- Bot must use long polling (not webhooks)\n"
         "- Bot should read token from BOT_TOKEN environment variable\n\n"
         "Commands:\n"
@@ -477,15 +483,30 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(error_msg) > 200:
         error_msg = error_msg[:200] + "..."
     
+    print(f"Error: {error_msg}")
+    
     if update and update.effective_message:
         await update.effective_message.reply_text(
             f"❌ An error occurred: {error_msg}"
         )
-    else:
-        print(f"Error: {error_msg}")
+
+def shutdown_handler(signum, frame):
+    """Handle shutdown signals"""
+    print("\n🛑 Shutting down bot...")
+    # Clean up any running processes
+    for bot_id in bot_manager.processes:
+        try:
+            bot_manager.stop_bot(bot_id)
+        except:
+            pass
+    sys.exit(0)
 
 def main():
     """Main function"""
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    
     # Create application
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -511,6 +532,11 @@ def main():
     
     print("🤖 Bot Hosting Service Started!")
     print(f"Bot token: {BOT_TOKEN[:10]}...")
+    print("📁 Directories created:")
+    print(f"   - Uploads: {UPLOAD_DIR}")
+    print(f"   - Bots: {BOTS_DIR}")
+    print(f"   - Logs: {LOGS_DIR}")
+    print("✅ Ready to host bots!\n")
     
     # Start the bot
     app.run_polling(allowed_updates=Update.ALL_TYPES)
